@@ -1,0 +1,264 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Recursos definidos para Github / Resources for Github.
+
+Resources:
+  # Tabla DynamoDB totales_VR
+  TotalesVRTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: 'totales_VR'
+      AttributeDefinitions:
+        - AttributeName: 'nombre_tabla'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'nombre_tabla'
+          KeyType: 'HASH'
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  # Tabla DynamoDB totales_RA
+  TotalesRATable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: 'totales_RA'
+      AttributeDefinitions:
+        - AttributeName: 'nombre_tabla'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'nombre_tabla'
+          KeyType: 'HASH'
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  # Tablas DynamoDB Tipo VR
+  VRoculusrift:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: 'VR_oculusRift'
+      AttributeDefinitions:
+        - AttributeName: 'VR_id'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'VR_id'
+          KeyType: 'HASH'
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  VRplaystation:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: 'VR_playstation'
+      AttributeDefinitions:
+        - AttributeName: 'VR_id'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'VR_id'
+          KeyType: 'HASH'
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  # Tablas DynamoDB Tipo RA 
+  RAtelefono:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: 'RA_telefono'
+      AttributeDefinitions:
+        - AttributeName: 'RA_id'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'RA_id'
+          KeyType: 'HASH'
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  RAtablet:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: 'RA_tablet'
+      AttributeDefinitions:
+        - AttributeName: 'RA_id'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'RA_id'
+          KeyType: 'HASH'
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  # Bucket S3 para almacenar el JSON de totales
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: 'new-VRRA-bucket'
+
+  # Rol para la Lambda
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:PutItem
+                  - dynamodb:ListTables
+                  - dynamodb:UpdateItem
+                Resource: '*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: arn:aws:s3:::new-VRRA-bucket/*
+
+        - PolicyName: SESAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: '*'
+
+  # Función Lambda 
+  FiltrarTablasLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: 'FiltrarTablas'
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          from datetime import datetime
+          import json
+
+          dynamodb = boto3.client('dynamodb')
+          s3 = boto3.client('s3')
+          ses = boto3.client('ses')
+
+          def lambda_handler(event, context):
+              tablas_sin_filtrar = dynamodb.list_tables()['TableNames']
+              vr_tablas, ra_tablas = filtrado_tablas(tablas_sin_filtrar)
+              actualizar_totales('totales_VR', vr_tablas)
+              actualizar_totales('totales_RA', ra_tablas)
+              totales_vr = scan_totales('totales_VR')
+              totales_ra = scan_totales('totales_RA')
+              guardar_s3(totales_vr, totales_ra)
+              enviar_email(totales_vr, totales_ra)
+
+          def filtrado_tablas(tablas_sin_filtrar):
+              vr_tables, ra_tables = [], []
+              for tabla in tablas_sin_filtrar:
+                  if tabla.startswith('VR_'):
+                      vr_tables.append(tabla)
+                  if tabla.startswith('RA_'):
+                      ra_tables.append(tabla)
+              return vr_tables, ra_tables
+
+          def actualizar_totales(totales_tipo, tablas):
+              for tabla in tablas:
+                  response = dynamodb.scan(TableName=tabla)
+                  contador_items = len(response['Items'])
+                  dynamodb.put_item(
+                      TableName=totales_tipo,
+                      Item={
+                          'nombre_tabla': {'S': tabla},
+                          'contador_items': {'N': str(contador_items)},
+                          'fecha_actualizada': {'S': datetime.utcnow().isoformat()}
+                      }
+                  )
+
+          def scan_totales(totales_tabla):
+              response = dynamodb.scan(TableName=totales_tabla)
+              return response['Items']
+
+          def guardar_s3(totales_vr, totales_ra):
+              nombre_bucket = 'new-VRRA-bucket'
+              filename = 'totales.json'
+              data = {'totales_VR': totales_vr, 'totales_RA': totales_ra}
+              json_data = json.dumps(data)
+              s3.put_object(Bucket=nombre_bucket, Key=filename, Body=json_data, ContentType='application/json')
+
+          def enviar_email(totales_vr, totales_ra):
+              source_email = ''
+              destination_email =''
+              ses.send_email(
+                  Source=source_email,
+                  Destination={'ToAddresses': [destination_email]},
+                  Message={
+                      'Subject': {'Data': 'Actualización de Totales VR y RA'},
+                      'Body': {
+                          'Text': {
+                              'Data': f'Totales VR: {totales_vr}\nTotales RA: {totales_ra}'
+                          }
+                      }
+                  }
+              )
+      Runtime: 'python3.9'
+      Timeout: 60
+
+  # Regla de EventBridge para invocar Lambda cada 5 minutos
+  InvokeLambdaEvery5Minutes:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      ScheduleExpression: 'rate(5 minutes)'
+      Targets:
+        - Arn: !GetAtt FiltrarTablasLambda.Arn
+          Id: 'FiltrarTablasLambda'
+    DependsOn: FiltrarTablasLambda
+
+  LambdaPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Ref FiltrarTablasLambda
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt InvokeLambdaEvery5Minutes.Arn
+
+Outputs:
+  TotalesRATable:
+    Description: 'Nombre de la tabla totales_RA'
+    Value: !Ref TotalesRATable
+
+  TotalesVRTable:
+    Description: 'Nombre de la tabla totales_VR'
+    Value: !Ref TotalesVRTable
+
+  VRoculusrift:
+    Description: 'Nombre de la tabla VR_oculusrift'
+    Value: !Ref VRoculusrift
+
+  VRplaystation:
+    Description: 'Nombre de la tabla VR_playstation'
+    Value: !Ref VRplaystation
+
+  RAtelefono:
+    Description: 'Nombre de la tabla RA_telefono'
+    Value: !Ref RAtelefono
+
+  RAtablet:
+    Description: 'Nombre de la tabla RA_tablet'
+    Value: !Ref RAtablet
+
+  LambdaFunctionName:
+    Description: 'Nombre de la función Lambda'
+    Value: !Ref FiltrarTablasLambda
